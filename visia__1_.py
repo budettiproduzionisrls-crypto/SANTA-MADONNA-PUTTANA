@@ -333,6 +333,26 @@ def filter_and_merge_programs(programs: list) -> list:
     if merged_groups:
         logging.info(f"✅ Accorpamento: {merged_groups} gruppi televendite uniti")
 
+    # --- STEP 3: accorpa programmi consecutivi con lo stesso titolo ---
+    # Segmenti/marcature dello stesso programma vengono uniti in un unico slot
+    if merged:
+        accorpati = [merged[0]]
+        merged_programs = 0
+        for p in merged[1:]:
+            last = accorpati[-1]
+            if p['title'] == last['title']:
+                # Stesso programma: somma durata, mantieni orario di inizio del primo
+                last['duration_seconds'] += p['duration_seconds']
+                # Mantieni la trama più lunga tra le due
+                if len(p.get('trama', '') or '') > len(last.get('trama', '') or ''):
+                    last['trama'] = p['trama']
+                merged_programs += 1
+            else:
+                accorpati.append(p)
+        if merged_programs:
+            logging.info(f"✅ Accorpamento programmi: {merged_programs} segmenti uniti")
+        merged = accorpati
+
     logging.info(f"📊 Programmi dopo filtro/accorpamento: {len(merged)} (erano {len(programs)})")
     return merged
 
