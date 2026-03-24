@@ -272,8 +272,8 @@ def is_promo(title: str) -> bool:
     return bool(re.search(r'\bpromo\b', title, re.IGNORECASE))
 
 def is_televendita(title: str) -> bool:
-    """Restituisce True se il titolo contiene la parola 'televendita' (case-insensitive)."""
-    return bool(re.search(r'\btelevendita\b', title, re.IGNORECASE))
+    """Restituisce True se il titolo contiene 'televendita/e' (case-insensitive)."""
+    return bool(re.search(r'\btelevendit[ae]\b', title, re.IGNORECASE))
 
 def filter_and_merge_programs(programs: list) -> list:
     """
