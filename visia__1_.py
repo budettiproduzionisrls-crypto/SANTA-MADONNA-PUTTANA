@@ -193,7 +193,7 @@ def read_palinsesto_from_db(date_yyyymmdd=None):
 
             query = """
             SELECT
-                p.ID, p.Orario, p.Durata, p.DurataElaborazione,
+                p.ID, p.ID_Programma, p.Orario, p.Durata, p.DurataElaborazione,
                 p.FrameIN, p.FrameOUT, p.Tipo_Oggetto, p.Stato, p.Ordine,
                 prog.Titolo AS Programma_Titolo,
                 prog.Descrizione AS Programma_Descrizione,
@@ -220,6 +220,8 @@ def read_palinsesto_from_db(date_yyyymmdd=None):
 
                 programs.append({
                     'orario_frame': row['Orario'],
+                    'id_programma': row['ID_Programma'],
+                    'programma_titolo': row['Programma_Titolo'],
                     'title': title,
                     'description': description,
                     'trama': row['TramaEpg'] or '',
@@ -272,14 +274,16 @@ def is_promo(title: str) -> bool:
     return bool(re.search(r'\bpromo\b', title, re.IGNORECASE))
 
 def is_televendita(title: str) -> bool:
-    """Restituisce True se il titolo contiene la parola 'televendita' (case-insensitive)."""
-    return bool(re.search(r'\btelevendita\b', title, re.IGNORECASE))
+    """Restituisce True se il titolo contiene 'televendita/e' (case-insensitive)."""
+    return bool(re.search(r'\btelevendit[ae]\b', title, re.IGNORECASE))
 
 def filter_and_merge_programs(programs: list) -> list:
     """
     1. Rimuove tutti i programmi il cui titolo contiene 'promo'.
-    2. Accorpa le televendite consecutive in un unico slot chiamato 'Televendite'
-       con durata sommata e orario di inizio della prima.
+    2. Accorpa segmenti consecutivi dello stesso programma (stesso ID_Programma)
+       in un unico slot con durata sommata.
+    3. Accorpa le televendite consecutive (qualsiasi titolo contenente 'televendita/e')
+       in un unico slot 'Televendite', inglobando eventuali programmi corti in mezzo.
     Restituisce la lista trasformata.
     """
     # --- STEP 1: filtra promo ---
@@ -288,10 +292,31 @@ def filter_and_merge_programs(programs: list) -> list:
     if removed_promo:
         logging.info(f"🚫 Rimossi {removed_promo} programmi 'promo'")
 
-    # --- STEP 2: accorpa televendite consecutive ---
-    # Un programma corto (<= 60s) circondato da televendite viene inglobato nel blocco
+    # --- STEP 2: accorpa segmenti consecutivi dello stesso programma (ID_Programma) ---
+    if filtered:
+        accorpati = [filtered[0]]
+        merged_segments = 0
+        for p in filtered[1:]:
+            last = accorpati[-1]
+            if (p.get('id_programma') and last.get('id_programma')
+                    and p['id_programma'] == last['id_programma']):
+                last['duration_seconds'] += p['duration_seconds']
+                if len(p.get('trama', '') or '') > len(last.get('trama', '') or ''):
+                    last['trama'] = p['trama']
+                if len(p.get('description', '') or '') > len(last.get('description', '') or ''):
+                    last['description'] = p['description']
+                merged_segments += 1
+            else:
+                accorpati.append(p)
+        if merged_segments:
+            logging.info(f"✅ Accorpamento segmenti: {merged_segments} segmenti uniti per ID_Programma")
+        filtered = accorpati
+
+    # --- STEP 3: accorpa televendite consecutive ---
+    # Qualsiasi programma con titolo contenente 'televendita/e' viene accorpato.
+    # Programmi corti (<= 120s) tra due televendite vengono inglobati nel blocco.
     def is_short(p):
-        return p['duration_seconds'] <= 60
+        return p['duration_seconds'] <= 120
 
     merged = []
     i = 0
@@ -299,7 +324,6 @@ def filter_and_merge_programs(programs: list) -> list:
     while i < len(filtered):
         prog = filtered[i]
         if is_televendita(prog['title']):
-            # Raccogli tutte le televendite consecutive, inglobando programmi corti in mezzo
             group_duration = prog['duration_seconds']
             j = i + 1
             while j < len(filtered):
@@ -307,11 +331,20 @@ def filter_and_merge_programs(programs: list) -> list:
                 if is_televendita(nxt['title']):
                     group_duration += nxt['duration_seconds']
                     j += 1
-                elif is_short(nxt) and j + 1 < len(filtered) and is_televendita(filtered[j + 1]['title']):
-                    # Programma corto in mezzo a televendite: inglobalo
-                    logging.info(f"📦 Inglobato programma corto '{nxt['title']}' ({nxt['duration_seconds']}s) nel blocco televendite")
-                    group_duration += nxt['duration_seconds']
-                    j += 1
+                elif is_short(nxt):
+                    # Programma corto: guarda se più avanti c'è ancora una televendita
+                    k = j + 1
+                    while k < len(filtered) and is_short(filtered[k]) and not is_televendita(filtered[k]['title']):
+                        k += 1
+                    if k < len(filtered) and is_televendita(filtered[k]['title']):
+                        # Ingloba tutti i programmi corti fino alla prossima televendita
+                        for idx in range(j, k):
+                            logging.info(f"📦 Inglobato '{filtered[idx]['title']}' ({filtered[idx]['duration_seconds']}s) nel blocco televendite")
+                            group_duration += filtered[idx]['duration_seconds']
+                        group_duration += filtered[k]['duration_seconds']
+                        j = k + 1
+                    else:
+                        break
                 else:
                     break
             count = j - i
@@ -673,6 +706,16 @@ def main():
     logging.info("🌙 Mezzanotte: Sync completa 7 giorni")
     logging.info("📺 Giorno: Sync a cambio programma")
     logging.info("=" * 60)
+
+    # Invalida cache vecchie (potrebbero avere dati non accorpati correttamente)
+    try:
+        for fname in os.listdir(CACHE_DIR):
+            if fname.endswith('.json'):
+                os.remove(os.path.join(CACHE_DIR, fname))
+        _memory_cache.clear()
+        logging.info("🧹 Cache invalidata: forza ri-lettura dal DB")
+    except Exception as e:
+        logging.warning(f"⚠️  Pulizia cache: {e}")
 
     logging.info("🔄 SYNC FORZATO AVVIO")
     export_cycle_batch()
